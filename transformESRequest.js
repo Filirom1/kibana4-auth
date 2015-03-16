@@ -1,57 +1,90 @@
 var _ = require('underscore');
+var querystring = require('querystring');
 var parse = require('url').parse;
 
-validate.Fail = function () {
-  this.message = "Fail" 
-};
-
-validate.BadIndex = function (index) {
-  validate.Fail.call(this);
-  this.message = 'Bad index "' + index + '" in request. ' + this.message;
-};
-
-function validate(req) {
+function transform(req) {
   var method = req.method.toUpperCase();
-  if (method === 'GET' || method === 'HEAD') return true;
+  var read;
+  if (method === 'GET' || method === 'HEAD') read=true;
+  var urlQuery = querystring.parse(parse(req.url).query).q;
 
-  var segments = _.compact(parse(req.url).pathname.split('/'));
+  var pathname = parse(req.url).pathname;
+
+  var segments = _.compact(pathname.split('/'));
   var maybeIndex = _.first(segments);
   var maybeMethod = _.last(segments);
 
   var add = (method === 'POST' || method === 'PUT');
   var rem = (method === 'DELETE');
 
-  // everything below this point assumes a destructive request of some sort
-  if (!add && !rem) throw new validate.Fail();
-
   var bodyStr = String(req.rawBody);
   var jsonBody = bodyStr && parseJson(bodyStr);
   var bulkBody = bodyStr && parseBulk(bodyStr);
-
-  // methods that accept standard json bodies
-  var maybeMGet = ('_mget' === maybeMethod && add && jsonBody);
-  var maybeSearch = ('_search' === maybeMethod && add && jsonBody);
-  var maybeValidate = ('_validate' === maybeMethod && add && jsonBody);
 
   // methods that accept bulk bodies
   var maybeBulk = ('_bulk' === maybeMethod && add && bulkBody);
   var maybeMsearch = ('_msearch' === maybeMethod && add && bulkBody);
 
   // indication that this request is against kibana
-  var maybeKibanaIndex = maybeIndex.match('.kibana');
+  if(maybeIndex){
+    var maybeKibanaIndex = maybeIndex.match('.kibana');
+    if(maybeKibanaIndex) return;
+  }
 
-  transform()
+  req.rawBody = transformBody()
+  console.log('>>>>>', req.url, req.rawBody)
 
-  return true;
+  function transformBody(){
+    if((maybeMsearch || maybeBulk) && bulkBody){
+      console.log(1)
+      for (i=0; i<bulkBody.length; i+=2) {
+        var header = bulkBody[i];
+        var req = bulkBody[i+1];
 
-  function transform(){
-    if(maybeMsearch || maybeBulk){
-      bulkBody.forEach(function(json){
-        var query = json.query;
-        json.query = {filtered: { query: query, filter: { term: {team: 'admin'} } }}
-      });
-      req.rawBody = stringifyBulk(bulkBody)
+        var index;
+        if(maybeBulk){
+          var op = _.keys(header).join('');
+          var meta = header[op];
+
+          if (!meta) throw new Error("not meta");
+
+          index = meta._index || maybeIndex;
+        }else if(maybeMsearch){
+          index = header.index || maybeIndex;
+        }
+        if(!index.match('.kibana')){
+          bulkBody[i+1] = transformQuery(req);
+        }
+      }
+      return stringifyBulk(bulkBody)
+    }else if(jsonBody){
+      console.log(2)
+      return JSON.stringify(transformQuery(jsonBody))
+    }else if(urlQuery){
+      console.log(3)
+      return JSON.stringify(transformQuery({
+        query: {
+          query_string: {
+            query: urlQuery
+          }
+        }
+      }))      
+    }else{
+      console.log(4)
+      return JSON.stringify(transformQuery({
+        query: {
+          match_all : { }
+        }
+      }))
     }
+  }
+
+  function transformQuery(json){
+    var query = json.query;
+    if(query){
+      json.query = {filtered: { query: query, filter: { term: {team: 'admin'} } }}
+    }
+    return json
   }
 
   function parseJson(str) {
@@ -72,8 +105,7 @@ function validate(req) {
 
     var body = new Array(parts.length);
     for (var i = 0; i < parts.length; i++) {
-      var part = parseJson(parts[i]);
-      if (!part) throw new validate.Fail();
+      var part = JSON.parse(parts[i]);
 
       body[i] = part;
     }
@@ -83,36 +115,6 @@ function validate(req) {
   function stringifyBulk(body) {
     return body.map(JSON.stringify).join('\n') + '\n';
   }
-
-  function validateNonBulkDestructive() {
-    // allow any destructive request against the kibana index
-    if (maybeKibanaIndex) return;
-
-    // allow json bodies sent to _mget _search and _validate
-    if (jsonBody && (maybeMGet || maybeSearch || maybeValidate)) return;
-
-    // allow bulk bodies sent to _msearch
-    if (bulkBody && (maybeMsearch)) return;
-
-    throw new validate.Fail();
-  }
-
-  function validateBulkBody(body) {
-    while (body.length) {
-      var header = body.shift();
-      var req = body.shift();
-
-      var op = _.keys(header).join('');
-      var meta = header[op];
-
-      if (!meta) throw new validate.Fail();
-
-      var index = meta._index || maybeIndex;
-      if (!index.match('.kibana')) {
-        throw new validate.BadIndex(index);
-      }
-    }
-  }
 }
 
-module.exports = validate;
+module.exports = transform;

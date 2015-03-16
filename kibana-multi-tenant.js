@@ -42,7 +42,7 @@ app.use(function (req, res, next) {
   });
 });
 
-app.use(function (req, res, next) {
+app.use('/elasticsearch', function (req, res, next) {
   try {
     transformESRequest(req);
     return next();
